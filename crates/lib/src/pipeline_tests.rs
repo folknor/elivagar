@@ -1006,56 +1006,58 @@ fn tile_features_ordered_by_paint_rank() {
             .expect("push rank-tagged record");
     }
     let mut reader = writer.finish().expect("finish sort writer");
-    let mut grouped = PendingTile {
-        tile_id,
-        features: Vec::new(),
-    };
+    let mut grouped = RawBatch::default();
+    grouped.begin_tile(tile_id).expect("open tile");
     let mut observed = Vec::new();
     for partition in reader.take_partitions() {
         let mut reader = sort::SortPartitionReader::open(&partition, sort::ChunkCompression::None)
             .expect("open sort partition");
         while let Some(record) = reader.next().expect("read sorted record") {
-            assert_eq!(record.key.tile(), grouped.tile_id);
+            assert_eq!(record.key.tile(), tile_id);
             assert_eq!(record.key.layer(), Some(Layer::Land));
             observed.push(record.key.rank());
-            grouped.features.push((Layer::Land, record.data));
+            grouped
+                .push_feature(Layer::Land, &record.data)
+                .expect("push feature");
         }
     }
     assert_eq!(observed, [0, 2, 3, 5]);
-    assert_eq!(grouped.features.len(), observed.len());
+    assert_eq!(grouped.tile(0).features().count(), observed.len());
 }
 
 /// Fixture for the MLT/MVT layer-model parity test.
 #[cfg(feature = "mlt")]
-fn parity_pending_tile(tile_id: TileId) -> PendingTile {
+fn parity_pending_tile(tile_id: TileId) -> RawBatch {
     let point_attrs = vec![("kind", AttrValue::Str(Cow::Borrowed("city")), 0)];
     let line_attrs = vec![("kind", AttrValue::Str(Cow::Borrowed("residential")), 0)];
 
-    PendingTile {
-        tile_id,
-        features: vec![
-            (
-                Layer::Pois,
-                crate::wire_format::encode_feature_data(
-                    11,
-                    mvt::GeomType::Point,
-                    &[9, 0, 0],
-                    &point_attrs,
-                    14,
-                ),
+    let mut batch = RawBatch::default();
+    batch.begin_tile(tile_id).expect("open tile");
+    batch
+        .push_feature(
+            Layer::Pois,
+            &crate::wire_format::encode_feature_data(
+                11,
+                mvt::GeomType::Point,
+                &[9, 0, 0],
+                &point_attrs,
+                14,
             ),
-            (
-                Layer::Streets,
-                crate::wire_format::encode_feature_data(
-                    21,
-                    mvt::GeomType::LineString,
-                    &[9, 4, 4, 18, 0, 16, 16, 0],
-                    &line_attrs,
-                    14,
-                ),
+        )
+        .expect("push feature");
+    batch
+        .push_feature(
+            Layer::Streets,
+            &crate::wire_format::encode_feature_data(
+                21,
+                mvt::GeomType::LineString,
+                &[9, 4, 4, 18, 0, 16, 16, 0],
+                &line_attrs,
+                14,
             ),
-        ],
-    }
+        )
+        .expect("push feature");
+    batch
 }
 
 #[test]
@@ -1789,7 +1791,12 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
 #[cfg(feature = "mlt")]
 #[test]
 fn encode_tile_batch_mlt_empty_batch_is_empty() {
-    match encode_tile_batch(&[], 6, TilePayloadFormat::Mlt, TileCompression::Gzip) {
+    match encode_tile_batch(
+        &RawBatch::default(),
+        6,
+        TilePayloadFormat::Mlt,
+        TileCompression::Gzip,
+    ) {
         Ok(encoded) => assert!(encoded.is_empty(), "empty batches should remain empty"),
         Err(err) => panic!("empty mlt batch should not fail: {err}"),
     }
@@ -1797,19 +1804,22 @@ fn encode_tile_batch_mlt_empty_batch_is_empty() {
 
 #[test]
 fn encode_tile_batch_mvt_empty_batch_is_empty() {
-    let encoded = encode_tile_batch(&[], 6, TilePayloadFormat::Mvt, TileCompression::Gzip)
-        .expect("mvt format should encode successfully");
+    let encoded = encode_tile_batch(
+        &RawBatch::default(),
+        6,
+        TilePayloadFormat::Mvt,
+        TileCompression::Gzip,
+    )
+    .expect("mvt format should encode successfully");
     assert!(encoded.is_empty());
 }
 
 #[cfg(feature = "mlt")]
 #[test]
 fn encode_tile_batch_mlt_empty_tile_encodes_to_no_output() {
-    let tile = PendingTile {
-        tile_id: TileId::at(3, 4, 5),
-        features: Vec::new(),
-    };
-    match encode_tile_batch(&[tile], 6, TilePayloadFormat::Mlt, TileCompression::Gzip) {
+    let mut tile = RawBatch::default();
+    tile.begin_tile(TileId::at(3, 4, 5)).expect("open tile");
+    match encode_tile_batch(&tile, 6, TilePayloadFormat::Mlt, TileCompression::Gzip) {
         Ok(encoded) => assert!(encoded.is_empty(), "empty tiles should be skipped"),
         Err(err) => panic!("mlt format should not fail for empty tile: {err}"),
     }
@@ -1822,10 +1832,10 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
     let tile = parity_pending_tile(tile_id);
 
     let mut scratch = AssemblyScratch::new();
-    let non_empty = prepare_non_empty_layers(&mut scratch, &tile).unwrap();
+    let non_empty = prepare_non_empty_layers(&mut scratch, &tile.tile(0)).unwrap();
     let model = mlt::build_tile_model(&non_empty).expect("schema properties");
     let mvt_encoded = encode_tile_batch(
-        &[parity_pending_tile(tile_id)],
+        &parity_pending_tile(tile_id),
         6,
         TilePayloadFormat::Mvt,
         TileCompression::Gzip,

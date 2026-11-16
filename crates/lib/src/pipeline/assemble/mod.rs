@@ -38,13 +38,142 @@ pub(super) use encode::encode_tile_batch;
 #[cfg(all(test, feature = "mlt"))]
 pub(super) use encode::{AssemblyScratch, prepare_non_empty_layers};
 
-/// A tile's features collected from the sort reader, ready for parallel encoding.
-pub(in crate::pipeline) struct PendingTile {
-    pub(in crate::pipeline) tile_id: TileId,
-    pub(in crate::pipeline) features: Vec<(Layer, Box<[u8]>)>,
+/// One raw batch of tiles read from a partition, stored flat: tile slots
+/// index a feature table, features index one payload slab. The merge reader
+/// appends each payload straight into the slab (`next_into`), so reading a
+/// batch allocates nothing per record or per tile, and the batch's storage
+/// is recycled to its reader once encoded. The per-record boxes and per-tile
+/// Vecs this replaced were about 2.5 billion allocations at planet, each
+/// made on a reader thread and freed on its encoder.
+#[derive(Default)]
+pub(in crate::pipeline) struct RawBatch {
+    tiles: Vec<TileSlot>,
+    features: Vec<FeatureRef>,
+    bytes: Vec<u8>,
 }
 
-const _: () = assert!(std::mem::size_of::<PendingTile>() == 32);
+#[derive(Clone, Copy)]
+struct TileSlot {
+    tile_id: TileId,
+    /// Feature table range `start..end`.
+    start: u32,
+    end: u32,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::pipeline) struct FeatureRef {
+    layer: Layer,
+    /// Slab range `start..start + len`.
+    start: u32,
+    len: u32,
+}
+
+fn batch_index(value: usize, what: &str) -> Result<u32, PipelineError> {
+    u32::try_from(value).map_err(|_| {
+        PipelineError::failed(format!(
+            "assemble batch {what} exceeds the 4 GiB batch index range"
+        ))
+    })
+}
+
+impl RawBatch {
+    pub(in crate::pipeline) fn len(&self) -> usize {
+        self.tiles.len()
+    }
+
+    pub(in crate::pipeline) fn is_empty(&self) -> bool {
+        self.tiles.is_empty()
+    }
+
+    /// Empty the batch, keeping its storage for the next one. Storage grown
+    /// past `keep_bytes` by an outsized tile is released, so one fat tile
+    /// does not pin its size in every recycled batch.
+    pub(in crate::pipeline) fn recycle(&mut self, keep_bytes: usize) {
+        self.tiles.clear();
+        self.features.clear();
+        self.bytes.clear();
+        if self.bytes.capacity() > keep_bytes.saturating_mul(2) {
+            self.bytes.shrink_to(keep_bytes);
+        }
+    }
+
+    /// Open a new tile; the features pushed after it are its own.
+    pub(in crate::pipeline) fn begin_tile(&mut self, tile_id: TileId) -> Result<(), PipelineError> {
+        let at = batch_index(self.features.len(), "feature count")?;
+        self.tiles.push(TileSlot {
+            tile_id,
+            start: at,
+            end: at,
+        });
+        Ok(())
+    }
+
+    /// The slab the merge reader appends payloads to.
+    pub(in crate::pipeline) fn bytes_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.bytes
+    }
+
+    /// Record a feature of the open tile whose payload already sits at
+    /// `range` in the slab.
+    pub(in crate::pipeline) fn push_feature_range(
+        &mut self,
+        layer: Layer,
+        range: std::ops::Range<usize>,
+    ) -> Result<(), PipelineError> {
+        let start = batch_index(range.start, "payload slab")?;
+        let len = batch_index(range.len(), "payload slab")?;
+        batch_index(range.end, "payload slab")?;
+        self.features.push(FeatureRef { layer, start, len });
+        let end = batch_index(self.features.len(), "feature count")?;
+        let tile = self
+            .tiles
+            .last_mut()
+            .ok_or_else(|| PipelineError::internal("assemble feature pushed before any tile"))?;
+        tile.end = end;
+        Ok(())
+    }
+
+    /// Append a payload and record it as a feature of the open tile.
+    #[cfg(test)]
+    pub(in crate::pipeline) fn push_feature(
+        &mut self,
+        layer: Layer,
+        data: &[u8],
+    ) -> Result<(), PipelineError> {
+        let start = self.bytes.len();
+        self.bytes.extend_from_slice(data);
+        self.push_feature_range(layer, start..self.bytes.len())
+    }
+
+    /// The `i`th tile.
+    pub(in crate::pipeline) fn tile(&self, i: usize) -> PendingTile<'_> {
+        let slot = self.tiles[i];
+        PendingTile {
+            tile_id: slot.tile_id,
+            features: &self.features[slot.start as usize..slot.end as usize],
+            bytes: &self.bytes,
+        }
+    }
+}
+
+/// One tile of a [`RawBatch`], borrowed for encoding.
+#[derive(Clone, Copy)]
+pub(in crate::pipeline) struct PendingTile<'a> {
+    pub(in crate::pipeline) tile_id: TileId,
+    features: &'a [FeatureRef],
+    bytes: &'a [u8],
+}
+
+impl<'a> PendingTile<'a> {
+    /// The tile's features in sort order: layer and encoded payload.
+    pub(in crate::pipeline) fn features(&self) -> impl Iterator<Item = (Layer, &'a [u8])> + 'a {
+        let bytes = self.bytes;
+        self.features.iter().map(move |f| {
+            let start = f.start as usize;
+            (f.layer, &bytes[start..start + f.len as usize])
+        })
+    }
+}
 
 /// A payload encoded under the run's tile contract, ready for PMTiles.
 /// Keep the contract on the run rather than every tile: a writer handles one

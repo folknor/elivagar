@@ -2,10 +2,10 @@
 //
 // Designed for planet-scale data (~100+ GB of sort records). Records are
 // buffered in memory up to a configurable chunk size, flushed as sorted chunk
-// files, then merged via a k-way merge using a binary heap.
+// files, then merged per partition by a k-way merge over a binary heap of
+// source indices (merge.rs).
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};

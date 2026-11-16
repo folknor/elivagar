@@ -774,8 +774,6 @@ impl Drop for ChunkReader {
     }
 }
 
-type ChunkRecord = (SortKey, Box<[u8]>);
-
 impl ChunkReader {
     pub(super) fn open(
         path: &Path,
@@ -855,10 +853,19 @@ impl ChunkReader {
         Ok(key)
     }
 
-    // Allocates a Vec per record. A reusable buffer was considered but the heap
-    // holds only k entries (1-4 chunks for Denmark, ~20 for planet) and records
-    // vary in size, so a pool would often reallocate anyway. Not a bottleneck.
-    pub(super) fn read_record(&mut self) -> Result<Option<ChunkRecord>, ChunkStoreError> {
+    /// Read the next record's payload into `buf`, returning its key and
+    /// length. `buf` keeps its initialized length at the largest record it
+    /// has held: a smaller record overwrites a prefix and only a larger one
+    /// grows it, so no record is zero-filled before being read over. The
+    /// payload is `buf[..len]`.
+    ///
+    /// This is the merge's hot path: the per-record allocation it replaced
+    /// was about 2.5 billion boxes at planet, each allocated on a reader
+    /// thread and freed on another once its batch was encoded.
+    pub(super) fn read_record_into(
+        &mut self,
+        buf: &mut Vec<u8>,
+    ) -> Result<Option<(SortKey, usize)>, ChunkStoreError> {
         if self.remaining == 0 {
             return Ok(None);
         }
@@ -870,15 +877,18 @@ impl ChunkReader {
             .read_exact(&mut buf4)
             .map_err(ChunkStoreError::read)?;
         let data_len = u32::from_le_bytes(buf4);
+        let len = data_len as usize;
 
-        let mut data = vec![0u8; data_len as usize].into_boxed_slice();
+        if buf.len() < len {
+            buf.resize(len, 0);
+        }
         self.reader
-            .read_exact(&mut data)
+            .read_exact(&mut buf[..len])
             .map_err(ChunkStoreError::read)?;
 
         self.remaining -= 1;
         self.bytes_read += 12 + u64::from(data_len);
-        Ok(Some((key, data)))
+        Ok(Some((key, len)))
     }
 
     /// Read the next record's header and discard its payload without
@@ -977,7 +987,7 @@ mod tests {
                         let mut reader =
                             ChunkReader::open_source(&source, compression, (start, end))
                                 .expect("open record reader");
-                        let result = reader.read_record();
+                        let result = reader.read_record_into(&mut Vec::new());
                         if valid {
                             assert_eq!(
                                 result.expect("valid record").expect("one record").0,
@@ -1117,17 +1127,20 @@ mod tests {
                 reader.remaining,
                 u32::try_from(records.len()).expect("test record count fits u32")
             );
+            // One buffer for every record: a record shorter than the
+            // buffer's high-water length must read back as exactly itself.
+            let mut buf = Vec::new();
             for expected in &records {
-                let (key, data) = reader
-                    .read_record()
+                let (key, len) = reader
+                    .read_record_into(&mut buf)
                     .expect("read sort chunk record")
                     .expect("record remains");
                 assert_eq!(key, expected.key);
-                assert_eq!(data.as_ref(), expected.data.as_ref());
+                assert_eq!(&buf[..len], expected.data.as_ref());
             }
             assert!(
                 reader
-                    .read_record()
+                    .read_record_into(&mut buf)
                     .expect("read past last sort chunk record")
                     .is_none()
             );

@@ -13,7 +13,7 @@ use crate::wire_format::add_feature_to_layer;
 use super::super::TilePayloadFormat;
 use super::super::{PipelineError, TileCompression, TileContract, compression_level_for_zoom};
 use super::artifact::ArtifactPartitionCtx;
-use super::{EncodedTile, LAYER_COUNT, PendingTile};
+use super::{EncodedTile, LAYER_COUNT, PendingTile, RawBatch};
 
 /// Brotli's I/O buffer size, independent of the tile coordinate grid.
 const BROTLI_BUFFER_BYTES: usize = 4096;
@@ -51,7 +51,7 @@ impl AssemblyScratch {
 /// Encode + compress a batch of tiles with no ocean artifact.
 #[cfg(test)]
 pub(in crate::pipeline) fn encode_tile_batch(
-    batch: &[PendingTile],
+    batch: &RawBatch,
     compression_level: u32,
     tile_format: TilePayloadFormat,
     tile_compression: TileCompression,
@@ -68,7 +68,7 @@ pub(in crate::pipeline) fn encode_tile_batch(
 /// before compression.
 #[hotpath::measure]
 pub(super) fn encode_partition_batch(
-    batch: &[PendingTile],
+    batch: &RawBatch,
     contract: TileContract,
     artifact: Option<&ArtifactPartitionCtx<'_>>,
 ) -> Result<Vec<EncodedTile>, PipelineError> {
@@ -104,16 +104,23 @@ fn artifact_contract_error() -> PipelineError {
 /// Encode + compress a batch of MVT tiles in parallel using rayon.
 #[hotpath::measure]
 fn encode_tile_batch_mvt(
-    batch: &[PendingTile],
+    batch: &RawBatch,
     compression_level: u32,
     tile_compression: TileCompression,
     artifact: Option<&ArtifactPartitionCtx<'_>>,
 ) -> Result<Vec<EncodedTile>, PipelineError> {
     use rayon::prelude::*;
 
-    let results: Vec<Result<Option<EncodedTile>, PipelineError>> = batch
-        .par_iter()
-        .map(|tile| encode_tile_mvt(tile, compression_level, tile_compression, artifact))
+    let results: Vec<Result<Option<EncodedTile>, PipelineError>> = (0..batch.len())
+        .into_par_iter()
+        .map(|i| {
+            encode_tile_mvt(
+                &batch.tile(i),
+                compression_level,
+                tile_compression,
+                artifact,
+            )
+        })
         .collect();
 
     let mut out = Vec::with_capacity(results.len());
@@ -130,7 +137,7 @@ fn encode_tile_batch_mvt(
 /// address, and the artifact planner copies the artifact's payload there
 /// untouched.
 fn encode_tile_mvt(
-    tile: &PendingTile,
+    tile: &PendingTile<'_>,
     compression_level: u32,
     tile_compression: TileCompression,
     artifact: Option<&ArtifactPartitionCtx<'_>>,
@@ -199,8 +206,11 @@ fn encode_tile_mvt(
 
 /// Both encoders consume this stage so format selection cannot change the
 /// geometry merge policy.
-fn prepare_tile_layers(s: &mut AssemblyScratch, tile: &PendingTile) -> Result<(), PipelineError> {
-    for &(layer, ref data) in &tile.features {
+fn prepare_tile_layers(
+    s: &mut AssemblyScratch,
+    tile: &PendingTile<'_>,
+) -> Result<(), PipelineError> {
+    for (layer, data) in tile.features() {
         add_feature_to_layer(
             get_or_create_layer(&mut s.layers, usize::from(layer as u8)),
             data,
@@ -243,7 +253,7 @@ fn prepare_tile_layers(s: &mut AssemblyScratch, tile: &PendingTile) -> Result<()
 #[cfg(any(feature = "mlt", test))]
 pub(in crate::pipeline) fn prepare_non_empty_layers<'a>(
     s: &'a mut AssemblyScratch,
-    tile: &PendingTile,
+    tile: &PendingTile<'_>,
 ) -> Result<Vec<&'a LayerBuilder>, PipelineError> {
     prepare_tile_layers(s, tile)?;
     Ok(non_empty_layers_in_tile_order(&s.layers))
@@ -263,14 +273,15 @@ fn non_empty_layers_in_tile_order(layers: &[Option<LayerBuilder>]) -> Vec<&Layer
 /// MLT tile contract carries `TileDataCompression::None`.
 #[cfg(feature = "mlt")]
 #[hotpath::measure]
-fn encode_tile_batch_mlt(batch: &[PendingTile]) -> Result<Vec<EncodedTile>, PipelineError> {
+fn encode_tile_batch_mlt(batch: &RawBatch) -> Result<Vec<EncodedTile>, PipelineError> {
     use rayon::prelude::*;
 
-    let results: Vec<Result<Option<EncodedTile>, PipelineError>> = batch
-        .par_iter()
-        .map(|tile| {
+    let results: Vec<Result<Option<EncodedTile>, PipelineError>> = (0..batch.len())
+        .into_par_iter()
+        .map(|i| {
+            let tile = batch.tile(i);
             let mut scratch = AssemblyScratch::new();
-            let non_empty = prepare_non_empty_layers(&mut scratch, tile)?;
+            let non_empty = prepare_non_empty_layers(&mut scratch, &tile)?;
             if non_empty.is_empty() {
                 return Ok(None);
             }
@@ -312,22 +323,22 @@ mod tests {
     #[test]
     fn shared_preparation_preserves_ocean_and_line_zoom_policy() {
         for z in [13, 14] {
-            let mut tile = PendingTile {
-                tile_id: TileId::at(z, 0, 0),
-                features: Vec::new(),
-            };
+            let mut batch = RawBatch::default();
+            batch.begin_tile(TileId::at(z, 0, 0)).unwrap();
             for coords in [[(100, 100), (200, 100)], [(200, 100), (300, 100)]] {
                 let mut geometry = Vec::new();
                 mvt::encode_linestring(&mut geometry, &coords);
-                tile.features.push((
-                    Layer::Boundaries,
-                    crate::wire_format::encode_feature_data_with_attrs(
-                        1,
-                        mvt::GeomType::LineString,
-                        &geometry,
-                        &[0],
-                    ),
-                ));
+                batch
+                    .push_feature(
+                        Layer::Boundaries,
+                        &crate::wire_format::encode_feature_data_with_attrs(
+                            1,
+                            mvt::GeomType::LineString,
+                            &geometry,
+                            &[0],
+                        ),
+                    )
+                    .unwrap();
             }
             let mut polygon = Vec::new();
             mvt::encode_polygon(
@@ -335,18 +346,20 @@ mod tests {
                 &[&[(100, 100), (200, 100), (200, 200), (100, 100)]],
             );
             for _ in 0..2 {
-                tile.features.push((
-                    Layer::Ocean,
-                    crate::wire_format::encode_feature_data_with_attrs(
-                        2,
-                        mvt::GeomType::Polygon,
-                        &polygon,
-                        &[0],
-                    ),
-                ));
+                batch
+                    .push_feature(
+                        Layer::Ocean,
+                        &crate::wire_format::encode_feature_data_with_attrs(
+                            2,
+                            mvt::GeomType::Polygon,
+                            &polygon,
+                            &[0],
+                        ),
+                    )
+                    .unwrap();
             }
             let mut scratch = AssemblyScratch::new();
-            let layers = prepare_non_empty_layers(&mut scratch, &tile).unwrap();
+            let layers = prepare_non_empty_layers(&mut scratch, &batch.tile(0)).unwrap();
             assert_eq!(layers.len(), 2);
             let boundaries = scratch.layers[Layer::Boundaries as usize].as_ref().unwrap();
             assert_eq!(boundaries.features.len(), 1);

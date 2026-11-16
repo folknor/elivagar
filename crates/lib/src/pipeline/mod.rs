@@ -1201,7 +1201,7 @@ use crate::multipolygon::{MemberWay, WayRole};
 #[cfg(test)]
 use crate::sort::SortRecord;
 #[cfg(test)]
-use assemble::{PendingTile, encode_tile_batch, phase_assemble};
+use assemble::{RawBatch, encode_tile_batch, phase_assemble};
 // Used only by the MLT/MVT layer-model parity test.
 #[cfg(all(test, feature = "mlt"))]
 use assemble::{AssemblyScratch, prepare_non_empty_layers};

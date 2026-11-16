@@ -16,7 +16,7 @@ use super::artifact::{
 };
 use super::encode::encode_partition_batch;
 use super::report::WriteTally;
-use super::{EncodedTile, PartitionItem, PendingTile};
+use super::{EncodedTile, PartitionItem, RawBatch};
 
 /// Partition scheduling is the union of ordinary sort sources and durable
 /// ocean-only ranges. The latter deliberately avoids creating an empty merge
@@ -393,6 +393,8 @@ pub(super) fn phase_assemble_partitions(
             let next_job_ref = &next_job;
             let stop_ref = &stop;
             s.spawn(move || {
+                // The worker's raw batches, recycled across its partitions.
+                let mut pool = BatchPool::default();
                 loop {
                     if stop_ref.load(Ordering::Relaxed) {
                         break;
@@ -433,6 +435,7 @@ pub(super) fn phase_assemble_partitions(
                                         assemble_budget,
                                         artifact_ctx,
                                         &tx,
+                                        &mut pool,
                                     )
                                 })
                         }
@@ -451,6 +454,7 @@ pub(super) fn phase_assemble_partitions(
                                 assemble_budget,
                                 artifact_ctx,
                                 &tx,
+                                &mut pool,
                             )
                         }),
                         UnionPartition::ArtifactOnly { start, end } => artifact_ctx
@@ -655,9 +659,47 @@ pub(super) fn phase_assemble_partitions(
 /// thread: the batch metadata and the pending tiles. The encoder's
 /// `ArtifactCursor` holds the range end that artifact gap filling runs to
 /// once `meta.is_last` arrives.
-type RawPartitionBatch = (PartitionBatchMeta, Vec<PendingTile>);
+type RawPartitionBatch = (PartitionBatchMeta, RawBatch);
 
-#[allow(clippy::too_many_lines)]
+/// Raw batches a partition worker reuses across its partitions. A worker
+/// circulates at most `TOKENS` of them: one being filled by the reader, one
+/// queued on the capacity-one channel, one being encoded - the overlap the
+/// reader/encoder split exists for. Encoded batches come back on a channel
+/// that never blocks, so neither side can wait on the other while holding a
+/// token the other needs: when the reader finds none free, every token it
+/// does not hold is queued, encoding, or already on its way back.
+#[derive(Default)]
+struct BatchPool {
+    free: Vec<RawBatch>,
+    created: usize,
+}
+
+impl BatchPool {
+    const TOKENS: usize = 3;
+}
+
+/// Take a batch: a free one, one the encoder has returned, a new one while
+/// the worker holds fewer than `TOKENS`, or else wait for a return. `None`
+/// when the encoder has stopped; its error surfaces at the join.
+fn acquire_batch(
+    pool: &mut BatchPool,
+    returned: &std::sync::mpsc::Receiver<RawBatch>,
+) -> Option<RawBatch> {
+    if let Some(batch) = pool.free.pop() {
+        return Some(batch);
+    }
+    if let Ok(batch) = returned.try_recv() {
+        return Some(batch);
+    }
+    if pool.created < BatchPool::TOKENS {
+        pool.created += 1;
+        return Some(RawBatch::default());
+    }
+    let _wait = wait_span(&WAIT.assemble_encode_backpressure);
+    returned.recv().ok()
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn read_encode_partition(
     order: usize,
     mut reader: sort::SortPartitionReader,
@@ -666,6 +708,7 @@ fn read_encode_partition(
     assemble_budget: usize,
     artifact: Option<&ArtifactPartitionCtx<'_>>,
     tx: &std::sync::mpsc::Sender<Result<PartitionBatch, PipelineError>>,
+    pool: &mut BatchPool,
 ) -> Result<(), PipelineError> {
     const BATCH_SIZE: usize = 4096;
 
@@ -687,13 +730,16 @@ fn read_encode_partition(
     // drains out - either error surfaces after the join.
     std::thread::scope(|scope| -> Result<(), PipelineError> {
         let (batch_tx, batch_rx) = std::sync::mpsc::sync_channel::<RawPartitionBatch>(1);
+        // Unbounded: returning a batch never blocks the encoder (see
+        // BatchPool); it holds at most the worker's token count.
+        let (return_tx, return_rx) = std::sync::mpsc::channel::<RawBatch>();
         let writer_tx = tx.clone();
         let encoder = scope.spawn(move || -> Result<(), PipelineError> {
             let mut artifact_cursor = ArtifactCursor {
                 next: range_start,
                 end: partition_end,
             };
-            while let Ok((meta, batch)) = batch_rx.recv() {
+            while let Ok((meta, mut batch)) = batch_rx.recv() {
                 encode_and_send_partition_batch(
                     &writer_tx,
                     contract,
@@ -702,30 +748,32 @@ fn read_encode_partition(
                     artifact,
                     &mut artifact_cursor,
                 )?;
+                batch.recycle(assemble_budget);
+                drop(return_tx.send(batch)); // reader gone: the batch drops
             }
             Ok(())
         });
 
         let read_result: Result<(), PipelineError> = (|| {
-            let mut batch_features_read: u64 = 0;
-            let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
-            // No tile yet: an empty feature list marks it, since every
-            // started tile holds at least the record that started it.
-            let mut current = PendingTile {
-                tile_id: TileId::ZERO,
-                features: Vec::new(),
+            let Some(mut batch) = acquire_batch(pool, &return_rx) else {
+                return Ok(());
             };
+            let mut batch_features_read: u64 = 0;
+            // The open tile, if any. Every opened tile holds at least the
+            // record that opened it.
+            let mut current: Option<TileId> = None;
             let mut current_tile_bytes: usize = 0;
             let mut batch_bytes: usize = 0;
             let mut batch_index = 0usize;
             let mut read_started = std::time::Instant::now();
 
             loop {
-                let record = reader.next()?;
-                let Some(r) = record else {
-                    if !current.features.is_empty() {
+                // Peek first: a record that opens a new tile must land in
+                // the batch that tile goes to, which is decided only once
+                // the open tile is closed below.
+                let Some(key) = reader.peek_key() else {
+                    if current.is_some() {
                         batch_bytes += 32 + current_tile_bytes;
-                        batch.push(current);
                     }
                     let mut reader_ns = 0;
                     add_reader_elapsed(&mut reader_ns, read_started);
@@ -744,14 +792,12 @@ fn read_encode_partition(
                     drop(send_result); // encoder may have exited on error
                     break;
                 };
-                batch_features_read += 1;
 
-                let tile_id = r.key.tile();
-                let layer = record_layer(r.key)?;
-                if tile_id != current.tile_id || current.features.is_empty() {
-                    if !current.features.is_empty() {
+                let tile_id = key.tile();
+                let layer = record_layer(key)?;
+                if current != Some(tile_id) {
+                    if current.is_some() {
                         batch_bytes += 32 + current_tile_bytes;
-                        batch.push(current);
                         if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
                             let mut reader_ns = 0;
                             add_reader_elapsed(&mut reader_ns, read_started);
@@ -772,21 +818,26 @@ fn read_encode_partition(
                                 // at the join below.
                                 return Ok(());
                             }
+                            let Some(next) = acquire_batch(pool, &return_rx) else {
+                                return Ok(());
+                            };
+                            batch = next;
                             batch_index += 1;
                             batch_features_read = 0;
-                            batch = Vec::with_capacity(BATCH_SIZE);
                             batch_bytes = 0;
                             read_started = std::time::Instant::now();
                         }
                     }
-                    current = PendingTile {
-                        tile_id,
-                        features: Vec::new(),
-                    };
+                    batch.begin_tile(tile_id)?;
+                    current = Some(tile_id);
                     current_tile_bytes = 0;
                 }
-                let data_len = r.data.len();
-                current.features.push((layer, r.data));
+                let (_, range) = reader
+                    .next_into(batch.bytes_mut())?
+                    .ok_or_else(|| PipelineError::internal("sort merge lost a peeked record"))?;
+                let data_len = range.len();
+                batch.push_feature_range(layer, range)?;
+                batch_features_read += 1;
                 current_tile_bytes += 32 + data_len;
             }
             Ok(())
@@ -794,6 +845,8 @@ fn read_encode_partition(
 
         drop(batch_tx);
         let encode_result = encoder.join().expect("assemble partition encoder panicked");
+        // The encoder is gone, so every batch it returned is in the channel.
+        pool.free.extend(return_rx.try_iter());
         read_result?;
         encode_result
     })
@@ -803,7 +856,7 @@ pub(super) fn encode_and_send_partition_batch(
     tx: &std::sync::mpsc::Sender<Result<PartitionBatch, PipelineError>>,
     contract: TileContract,
     meta: &PartitionBatchMeta,
-    pending_tiles: &[PendingTile],
+    pending_tiles: &RawBatch,
     artifact: Option<&ArtifactPartitionCtx<'_>>,
     artifact_cursor: &mut ArtifactCursor,
 ) -> Result<(), PipelineError> {
@@ -929,6 +982,7 @@ mod tests {
             1 << 20,
             None,
             &tx,
+            &mut BatchPool::default(),
         )
         .expect_err("assembly refuses the forged layer byte");
         assert!(

@@ -299,7 +299,7 @@ pub(super) fn plan_artifact_items(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::super::super::{TileCompression, TileContract};
-    use super::super::PendingTile;
+    use super::super::RawBatch;
     use super::super::encode::encode_partition_batch;
     use super::super::schedule::{PartitionBatchMeta, encode_and_send_partition_batch};
     use super::*;
@@ -599,10 +599,8 @@ mod tests {
         let ctx = ArtifactPartitionCtx::new(&tiles).expect("artifact partition ctx");
         // A pending tile with no features prepares no layer and encodes to
         // nothing, the same outcome as features that all drop.
-        let pending = [PendingTile {
-            tile_id: address,
-            features: Vec::new(),
-        }];
+        let mut pending = RawBatch::default();
+        pending.begin_tile(address).unwrap();
         // The artifact payload here is opaque, not gzip: a tile that does
         // not survive must never read it.
         assert!(
@@ -739,14 +737,15 @@ mod tests {
         let tiles = world_artifact(dir.path(), &addresses, &payload);
         let ctx = ArtifactPartitionCtx::new(&tiles).unwrap();
         let field = ocean_layer_field(&payload).unwrap();
-        let pending = || -> Vec<PendingTile> {
-            addresses
-                .iter()
-                .map(|&tile_id| PendingTile {
-                    tile_id,
-                    features: vec![(Layer::Boundaries, line_record())],
-                })
-                .collect()
+        let pending = || -> RawBatch {
+            let mut batch = RawBatch::default();
+            for &tile_id in &addresses {
+                batch.begin_tile(tile_id).unwrap();
+                batch
+                    .push_feature(Layer::Boundaries, &line_record())
+                    .unwrap();
+            }
+            batch
         };
 
         let osm_only = encode_partition_batch(&pending(), MVT_GZIP_6, None).unwrap();
@@ -779,10 +778,11 @@ mod tests {
         let address = TileId::at(10, 3, 5);
         let tiles = world_artifact(dir.path(), &[address], &ocean_payload());
         let ctx = ArtifactPartitionCtx::new(&tiles).unwrap();
-        let pending = [PendingTile {
-            tile_id: address,
-            features: vec![(Layer::Ocean, polygon_record())],
-        }];
+        let mut pending = RawBatch::default();
+        pending.begin_tile(address).unwrap();
+        pending
+            .push_feature(Layer::Ocean, &polygon_record())
+            .unwrap();
         let Err(error) = encode_partition_batch(&pending, MVT_GZIP_6, Some(&ctx)) else {
             panic!("computed ocean on an artifact-owned tile was accepted");
         };
@@ -809,7 +809,7 @@ mod tests {
             TileContract::Mlt,
         ] {
             assert!(
-                encode_partition_batch(&[], contract, Some(&ctx)).is_err(),
+                encode_partition_batch(&RawBatch::default(), contract, Some(&ctx)).is_err(),
                 "{contract:?} accepted an artifact"
             );
         }

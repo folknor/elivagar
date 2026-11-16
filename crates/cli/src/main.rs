@@ -10,6 +10,15 @@
 // glibc, so it does not pay for its dependency either. pbfhogg reached
 // its records on the system allocator the same way.
 //
+// Re-measured at planet on bygg on 2026-11-16 at commit 3295854, after
+// tilemaker reported 10-17% from preloaded jemalloc: glibc 9:44, jemalloc
+// 9:40, jemalloc with thp:always and metadata_thp:always 9:40 - par again.
+// The phases moved in opposite directions: under jemalloc assemble ran
+// 202 s against 223 s with 47K voluntary context switches against 770K and
+// 3 GB less peak anon, while phase12 ran 376 s against 359 s with 2.6x the
+// minor faults. The assemble gap is a property of this code under glibc,
+// to be removed in the code, not by swapping allocators.
+//
 // hotpath 0.14 installed CountingAllocator internally under hotpath-alloc; as
 // of 0.20 it is a plain generic type the consumer must declare - the crate no
 // longer wires it up on its own. Without this, hotpath-alloc builds fall back

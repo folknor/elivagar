@@ -1,71 +1,137 @@
 use super::*;
 
 // ---------------------------------------------------------------------------
-// HeapEntry - element in the merge heap
+// PartitionMergeReader - k-way merge of sorted chunk files
 // ---------------------------------------------------------------------------
 
-struct HeapEntry {
+/// One merge input: its chunk reader and its current record, held in a
+/// buffer the source reuses for every record it reads.
+struct MergeSource {
+    reader: ChunkReader,
     key: SortKey,
-    data: Box<[u8]>,
-    chunk_idx: usize,
+    buf: Vec<u8>,
+    len: usize,
 }
-const _: () = assert!(std::mem::size_of::<HeapEntry>() == 32);
 
-impl Eq for HeapEntry {}
+impl MergeSource {
+    fn data(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
 
-impl PartialEq for HeapEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.key == other.key && self.data == other.data && self.chunk_idx == other.chunk_idx
+    /// Read the next record into this source's buffer; false at its end.
+    fn advance(&mut self) -> Result<bool, ChunkStoreError> {
+        match self.reader.read_record_into(&mut self.buf)? {
+            Some((key, len)) => {
+                self.key = key;
+                self.len = len;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 }
 
-impl Ord for HeapEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering: smallest record should come out first from a max-heap.
-        record_cmp(other.key, &other.data, self.key, &self.data)
-            .then_with(|| other.chunk_idx.cmp(&self.chunk_idx))
+/// The merge order: the smaller record first by `record_cmp` (key, then
+/// payload bytes), and between identical records the source with the LARGER
+/// index first - the order the earlier `BinaryHeap` of boxed records
+/// produced, kept exactly. Source indices are never renumbered, so an
+/// exhausted source leaves the others' ranks unchanged.
+fn merge_before(sources: &[MergeSource], a: usize, b: usize) -> bool {
+    let (sa, sb) = (&sources[a], &sources[b]);
+    match record_cmp(sa.key, sa.data(), sb.key, sb.data()) {
+        Ordering::Less => true,
+        Ordering::Greater => false,
+        Ordering::Equal => a > b,
     }
 }
-
-impl PartialOrd for HeapEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SortReader - k-way merge of sorted chunk files
-// ---------------------------------------------------------------------------
 
 struct PartitionMergeReader {
-    chunk_readers: Vec<ChunkReader>,
-    heap: BinaryHeap<HeapEntry>,
+    sources: Vec<MergeSource>,
+    /// Binary min-heap, by `merge_before`, of the indices of sources that
+    /// hold a record. A source's record is never changed while its index is
+    /// in the heap except at the root, which is re-sifted at once.
+    heap: Vec<usize>,
 }
 
 impl PartitionMergeReader {
     /// Prime the merge heap from already-open (and possibly skipped-into)
     /// chunk readers.
-    fn from_chunk_readers(mut chunk_readers: Vec<ChunkReader>) -> Result<Self, ChunkStoreError> {
-        let mut heap = BinaryHeap::with_capacity(chunk_readers.len());
-        for (idx, cr) in chunk_readers.iter_mut().enumerate() {
-            if let Some((key, data)) = cr.read_record()? {
-                heap.push(HeapEntry {
-                    key,
-                    data,
-                    chunk_idx: idx,
-                });
-            }
-        }
-
+    fn from_chunk_readers(chunk_readers: Vec<ChunkReader>) -> Result<Self, ChunkStoreError> {
         SORT_MERGE_MAX_FANIN.fetch_max(
             u64::try_from(chunk_readers.len()).unwrap_or(u64::MAX),
             std::sync::atomic::Ordering::Relaxed,
         );
+        let mut sources = Vec::with_capacity(chunk_readers.len());
+        let mut heap = Vec::with_capacity(chunk_readers.len());
+        for reader in chunk_readers {
+            let mut source = MergeSource {
+                reader,
+                key: SortKey::from_raw(0),
+                buf: Vec::new(),
+                len: 0,
+            };
+            let live = source.advance()?;
+            if live {
+                heap.push(sources.len());
+            }
+            sources.push(source);
+        }
+        let mut merge = Self { sources, heap };
+        for i in (0..merge.heap.len() / 2).rev() {
+            merge.sift_down(i);
+        }
+        Ok(merge)
+    }
 
-        Ok(Self {
-            chunk_readers,
-            heap,
-        })
+    fn sift_down(&mut self, mut i: usize) {
+        let n = self.heap.len();
+        loop {
+            let left = 2 * i + 1;
+            if left >= n {
+                return;
+            }
+            let right = left + 1;
+            let mut best = left;
+            if right < n && merge_before(&self.sources, self.heap[right], self.heap[left]) {
+                best = right;
+            }
+            if merge_before(&self.sources, self.heap[best], self.heap[i]) {
+                self.heap.swap(i, best);
+                i = best;
+            } else {
+                return;
+            }
+        }
+    }
+
+    /// The key of the next record, without consuming it.
+    fn peek_key(&self) -> Option<SortKey> {
+        self.heap.first().map(|&idx| self.sources[idx].key)
+    }
+
+    /// Append the next record's payload to `out` and return its key and
+    /// byte range there, then advance its source. On an error the payload
+    /// may already be in `out`: the caller discards `out`'s contents, as
+    /// every caller does with a batch whose read failed.
+    fn next_into(
+        &mut self,
+        out: &mut Vec<u8>,
+    ) -> Result<Option<(SortKey, std::ops::Range<usize>)>, ChunkStoreError> {
+        let Some(&idx) = self.heap.first() else {
+            return Ok(None);
+        };
+        let key = self.sources[idx].key;
+        let start = out.len();
+        out.extend_from_slice(self.sources[idx].data());
+        let end = out.len();
+        if !self.sources[idx].advance()? {
+            let last = self.heap.pop().expect("heap holds the root");
+            if !self.heap.is_empty() {
+                self.heap[0] = last;
+            }
+        }
+        self.sift_down(0);
+        Ok(Some((key, start..end)))
     }
 
     fn new(
@@ -81,26 +147,11 @@ impl PartitionMergeReader {
     }
 
     fn next(&mut self) -> Result<Option<SortRecord>, ChunkStoreError> {
-        let entry = match self.heap.pop() {
-            Some(e) => e,
-            None => return Ok(None),
-        };
-
-        let idx = entry.chunk_idx;
-        let result = SortRecord {
-            key: entry.key,
-            data: entry.data,
-        };
-
-        if let Some((key, data)) = self.chunk_readers[idx].read_record()? {
-            self.heap.push(HeapEntry {
-                key,
-                data,
-                chunk_idx: idx,
-            });
-        }
-
-        Ok(Some(result))
+        let mut data = Vec::new();
+        Ok(self.next_into(&mut data)?.map(|(key, _)| SortRecord {
+            key,
+            data: data.into_boxed_slice(),
+        }))
     }
 }
 
@@ -171,9 +222,28 @@ impl SortPartitionReader {
         })
     }
 
+    /// The next record as an owned allocation. For tests and tools; the
+    /// assemble hot path uses [`Self::peek_key`] and [`Self::next_into`].
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<SortRecord>, ChunkStoreError> {
         self.inner.next()
+    }
+
+    /// The next record's key, without consuming it, so a caller can choose
+    /// where the payload goes (assemble closes a batch at a tile boundary
+    /// before the next tile's first payload lands in it).
+    pub fn peek_key(&self) -> Option<SortKey> {
+        self.inner.peek_key()
+    }
+
+    /// Append the next record's payload to `out`; returns its key and byte
+    /// range in `out`. On an error the payload may already be appended and
+    /// `out` must be discarded.
+    pub fn next_into(
+        &mut self,
+        out: &mut Vec<u8>,
+    ) -> Result<Option<(SortKey, std::ops::Range<usize>)>, ChunkStoreError> {
+        self.inner.next_into(out)
     }
 }
 
@@ -462,6 +532,71 @@ mod tests {
                 (other, b"z".to_vec()),
             ]
         );
+    }
+
+    #[test]
+    fn index_heap_merge_equals_a_global_record_sort() {
+        // Many chunks, few distinct keys (heavy ties resolved by payload),
+        // payload lengths that rise and fall so each source buffer is
+        // overwritten by shorter records after longer ones.
+        let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut step = || {
+            rng = rng
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            rng >> 33
+        };
+        let dir = tempfile::tempdir().expect("sort test operation");
+        let mut all: Vec<(SortKey, Vec<u8>)> = Vec::new();
+        let mut paths = Vec::new();
+        for idx in 0..23 {
+            let mut records: Vec<SortRecord> = (0..40)
+                .map(|_| {
+                    // One tile, so every chunk file is one partition's.
+                    let key = make_sort_key(7, 11, u8::try_from(step() % 3).unwrap());
+                    let len = usize::try_from(step() % 70).unwrap();
+                    let data: Vec<u8> = (0..len)
+                        .map(|_| u8::try_from(step() % 4).unwrap())
+                        .collect();
+                    SortRecord {
+                        key,
+                        data: data.into_boxed_slice(),
+                    }
+                })
+                .collect();
+            for r in &records {
+                all.push((r.key, r.data.to_vec()));
+            }
+            let path = chunk_path(dir.path(), idx, partition_from_key(records[0].key));
+            write_sorted_chunk(&mut records, &path, ChunkCompression::None)
+                .expect("sort test operation");
+            paths.push(path);
+        }
+        all.sort_by(|a, b| key::record_cmp(a.0, &a.1, b.0, &b.1));
+
+        let reader = SortReader::new(&paths, ChunkCompression::None).expect("sort test operation");
+        let merged: Vec<(SortKey, Vec<u8>)> = collect_records(reader, ChunkCompression::None)
+            .into_iter()
+            .map(|r| (r.key, r.data.into_vec()))
+            .collect();
+        assert_eq!(merged, all);
+
+        // The lending path appends the same records, in the same order, into
+        // one slab.
+        let mut reader =
+            SortReader::new(&paths, ChunkCompression::None).expect("sort test operation");
+        let mut slab = Vec::new();
+        let mut lent = Vec::new();
+        for partition in reader.take_partitions() {
+            let mut partition_reader =
+                SortPartitionReader::open(&partition, ChunkCompression::None).unwrap();
+            while let Some(peeked) = partition_reader.peek_key() {
+                let (key, range) = partition_reader.next_into(&mut slab).unwrap().unwrap();
+                assert_eq!(key, peeked);
+                lent.push((key, slab[range].to_vec()));
+            }
+        }
+        assert_eq!(lent, all);
     }
 
     #[test]
