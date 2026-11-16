@@ -23,8 +23,9 @@ crates/corpus enables `serde_json/float_roundtrip`, while crates/lib and
 crates/cli use plain `serde_json`. Under resolver 3, a `-p elivagar-corpus`
 build (`brokkr run elivagar-corpus`) resolves serde_json with the feature
 and every product build resolves it without, so serde_json and crates/lib
-build in two variants. Not confirmed as the cause of the reported
-recompile-every-time. Fix: enable `float_roundtrip` on crates/lib's
+build in two variants: one extra library build when switching between the
+corpus tool and a product build, not a rebuild per call (two back-to-back
+`brokkr run elivagar-corpus` calls rebuild nothing). Fix: enable `float_roundtrip` on crates/lib's
 serde_json too, so every graph agrees. The feature changes how the library
 parses floats, so check what JSON crates/lib parses and run the corpus gate
 before landing it.

@@ -108,11 +108,13 @@ pub(super) fn foreign_element_error(routed: BlockKind) -> PipelineError {
 }
 
 /// A decoded block, its routing kind and, for a way block under injected
-/// membership, its validated bitmap.
+/// membership, its validated bitmap; on the main locations pass, the byte
+/// range of the frame it came from.
 pub(super) struct Decoded {
     pub(super) block: PrimitiveBlock,
     pub(super) kind: Option<BlockKind>,
     pub(super) members: Option<InjectedMembers>,
+    pub(super) range: Option<FrameRange>,
 }
 
 type DecodedBlock = Result<Decoded, PipelineError>;
@@ -305,46 +307,132 @@ pub(super) struct UnorderedBlockSource {
     rx: Option<std::sync::mpsc::Receiver<DecodedBlock>>,
     reader_handle: Option<std::thread::JoinHandle<()>>,
     decode_handles: Vec<std::thread::JoinHandle<()>>,
+    /// The main pass's own handle on the input, kept for the relation
+    /// replay (see `replay`): opened before the first read, so the replay
+    /// reads the file this pass read, not whatever the path names later.
+    replay_file: Option<std::fs::File>,
 }
 
+/// A blob handed to a decode worker, with the byte range its whole frame
+/// occupies in the input when the source tracks ranges.
+type RawBlob = (pbfhogg::Blob, Option<FrameRange>);
+
 impl UnorderedBlockSource {
+    /// The main locations-mode read: every decoded block carries the byte
+    /// range of its frame, so the relation tail can replay exactly the
+    /// relation frames instead of re-reading the file.
     pub(super) fn spawn(
         path: &std::path::Path,
         decode_threads: usize,
         injected_members: bool,
         injected_pins: bool,
     ) -> Result<Self, PipelineError> {
-        let raw_cap = (decode_threads * 2).max(8);
-        let decoded_cap = (decode_threads * 2).max(8);
-        let (raw_tx, raw_rx) = std::sync::mpsc::sync_channel::<pbfhogg::Blob>(raw_cap);
-        let raw_rx = std::sync::Arc::new(std::sync::Mutex::new(raw_rx));
-        let (decoded_tx, decoded_rx) = std::sync::mpsc::sync_channel::<DecodedBlock>(decoded_cap);
-
+        let replay_file =
+            std::fs::File::open(path).map_err(|e| PipelineError::io("failed to open PBF", e))?;
+        let file_len = replay_file
+            .metadata()
+            .map_err(|e| PipelineError::io("failed to stat PBF", e))?
+            .len();
         let mut reader = pbfhogg::BlobReader::from_path(path)
             .map_err(|e| PipelineError::failed("failed to open PBF").with_cause(e))?;
         reader.set_parse_waymembers(injected_members);
+        // The reader opened the path itself. The path still naming the inode
+        // the replay handle holds, after that open, means both opens reached
+        // the same file - so the replay reads the file the recorded ranges
+        // index. In-place modification is outside this check, as it is
+        // outside every input assumption here.
+        same_file(&replay_file, path)?;
+        let mut source = Self::spawn_reader(
+            reader,
+            Some(file_len),
+            decode_threads,
+            injected_members,
+            injected_pins,
+        );
+        source.replay_file = Some(replay_file);
+        Ok(source)
+    }
+
+    /// A source over the relation frames the main pass recorded, read back
+    /// through `replay::FrameRuns`. Its blocks carry no ranges.
+    pub(super) fn spawn_replay(runs: super::replay::FrameRuns, decode_threads: usize) -> Self {
+        let reader = pbfhogg::BlobReader::new(std::io::BufReader::with_capacity(
+            super::replay::READ_BUFFER_BYTES,
+            runs,
+        ));
+        Self::spawn_reader(reader, None, decode_threads, false, false)
+    }
+
+    /// Reader thread plus decode pool over any blob stream. With `file_len`
+    /// the reader holds one blob back so the next blob's offset closes its
+    /// frame range; every blob the reader yields - header and unknown blobs
+    /// included - delimits a frame, so ranges are recorded before the
+    /// OsmData filter discards the others.
+    fn spawn_reader<R: std::io::Read + Send + 'static>(
+        reader: pbfhogg::BlobReader<R>,
+        file_len: Option<u64>,
+        decode_threads: usize,
+        injected_members: bool,
+        injected_pins: bool,
+    ) -> Self {
+        let raw_cap = (decode_threads * 2).max(8);
+        let decoded_cap = (decode_threads * 2).max(8);
+        let (raw_tx, raw_rx) = std::sync::mpsc::sync_channel::<RawBlob>(raw_cap);
+        let raw_rx = std::sync::Arc::new(std::sync::Mutex::new(raw_rx));
+        let (decoded_tx, decoded_rx) = std::sync::mpsc::sync_channel::<DecodedBlock>(decoded_cap);
 
         let reader_err_tx = decoded_tx.clone();
         let reader_handle = std::thread::spawn(move || {
+            let fail = |error: PipelineError| drop(reader_err_tx.send(Err(error)));
+            let send = |blob: pbfhogg::Blob, range: Option<FrameRange>| -> bool {
+                if !matches!(blob.get_type(), pbfhogg::BlobType::OsmData) {
+                    return true;
+                }
+                let _wait = wait_span(&WAIT.read_raw_send);
+                raw_tx.send((blob, range)).is_ok() // false: consumer gone, stop
+            };
+            let mut pending: Option<(pbfhogg::Blob, u64)> = None;
             for blob_result in reader {
-                match blob_result {
-                    Ok(blob) => {
-                        if !matches!(blob.get_type(), pbfhogg::BlobType::OsmData) {
-                            continue;
-                        }
-                        let _wait = wait_span(&WAIT.read_raw_send);
-                        if raw_tx.send(blob).is_err() {
-                            break; // consumer gone (error path); stop reading
-                        }
-                    }
+                let blob = match blob_result {
+                    Ok(blob) => blob,
                     Err(e) => {
-                        drop(
-                            reader_err_tx
-                                .send(Err(PipelineError::failed("PBF read failed").with_cause(e))),
-                        );
-                        break;
+                        fail(PipelineError::failed("PBF read failed").with_cause(e));
+                        return;
+                    }
+                };
+                if file_len.is_none() {
+                    if !send(blob, None) {
+                        return;
+                    }
+                    continue;
+                }
+                let Some(start) = blob.offset().map(|offset| offset.0) else {
+                    fail(PipelineError::internal(
+                        "PBF reader yielded a blob without its byte offset",
+                    ));
+                    return;
+                };
+                if let Some((prev, prev_start)) = pending.take() {
+                    let Some(range) = FrameRange::new(prev_start, start) else {
+                        fail(PipelineError::internal("PBF blob offsets do not increase"));
+                        return;
+                    };
+                    if !send(prev, Some(range)) {
+                        return;
                     }
                 }
+                pending = Some((blob, start));
+            }
+            if let (Some((last, start)), Some(len)) = (pending, file_len) {
+                // The last frame runs to the end of the file. pbfhogg reads
+                // a 1-3 byte partial length prefix there as a clean end; the
+                // replay can include those bytes only because this range is
+                // the last one the file has.
+                let Some(range) = FrameRange::new(start, len) else {
+                    fail(PipelineError::internal("PBF blob offset past end of file"));
+                    return;
+                };
+                send(last, Some(range));
             }
             // raw_tx drops: decode workers drain the channel and exit.
         });
@@ -359,10 +447,11 @@ impl UnorderedBlockSource {
                         let guard = rx.lock().expect("raw blob channel lock");
                         guard.recv()
                     };
-                    let Ok(blob) = blob else {
+                    let Ok((blob, range)) = blob else {
                         break; // reader done and channel drained
                     };
-                    let item = decode_blob(&blob, injected_members, injected_pins);
+                    let item = decode_blob(&blob, injected_members, injected_pins)
+                        .map(|decoded| Decoded { range, ..decoded });
                     let _wait = wait_span(&WAIT.read_decoded_send);
                     if tx.send(item).is_err() {
                         break; // consumer gone
@@ -372,11 +461,12 @@ impl UnorderedBlockSource {
         }
         drop(decoded_tx);
 
-        Ok(Self {
+        Self {
             rx: Some(decoded_rx),
             reader_handle: Some(reader_handle),
             decode_handles,
-        })
+            replay_file: None,
+        }
     }
 
     /// Next decoded block, or `None` once every sender is done.
@@ -401,8 +491,11 @@ impl UnorderedBlockSource {
     }
 
     /// Success-path completion: a source-thread panic is reported here.
-    pub(super) fn finish(mut self) {
+    /// Returns the main pass's input handle for the relation replay (`None`
+    /// for a replay source).
+    pub(super) fn finish(mut self) -> Option<std::fs::File> {
         assert!(!self.shut_down(), "PBF source thread panicked");
+        self.replay_file.take()
     }
 }
 
@@ -439,7 +532,43 @@ fn decode_blob(blob: &pbfhogg::Blob, injected_members: bool, injected_pins: bool
         block,
         kind,
         members,
+        range: None,
     })
+}
+
+/// Refuse unless `path` names the same inode as `file`.
+fn same_file(file: &std::fs::File, path: &std::path::Path) -> Result<(), PipelineError> {
+    use std::os::unix::fs::MetadataExt;
+    let held = file
+        .metadata()
+        .map_err(|e| PipelineError::io("failed to stat PBF", e))?;
+    let named = std::fs::metadata(path).map_err(|e| PipelineError::io("failed to stat PBF", e))?;
+    if (held.dev(), held.ino()) == (named.dev(), named.ino()) {
+        Ok(())
+    } else {
+        Err(PipelineError::failed(
+            "the input PBF was replaced while it was being opened",
+        ))
+    }
+}
+
+/// The bytes one blob's whole frame (length prefix, `BlobHeader`, body)
+/// occupies in the input: from its offset to the next frame's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FrameRange {
+    pub(super) start: u64,
+    pub(super) end: u64,
+}
+
+impl FrameRange {
+    /// `None` unless `start < end`: a frame is never empty.
+    pub(super) fn new(start: u64, end: u64) -> Option<Self> {
+        (start < end).then_some(Self { start, end })
+    }
+
+    pub(super) fn len(self) -> u64 {
+        self.end - self.start
+    }
 }
 
 #[cfg(test)]

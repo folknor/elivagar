@@ -12,6 +12,7 @@ mod input;
 mod nodes;
 mod plans;
 mod prepass;
+mod replay;
 mod ways;
 
 use std::sync::Arc;
@@ -31,7 +32,7 @@ use super::stats::{FanoutStats, MissingRefStatsAtomic, Phase12Stats};
 use super::{PipelineError, RunPlan, SORT_CHUNKS_DIR};
 use crate::tiling::ZoomRange;
 use extent::CoordinateExtent;
-use input::{BlockKind, InjectedMembers, UnorderedBlockSource, WayBlock, WayMembers};
+use input::{BlockKind, FrameRange, InjectedMembers, UnorderedBlockSource, WayBlock, WayMembers};
 use nodes::{NodeOutcome, NodeWorkers};
 use plans::MemberSource;
 pub(super) use plans::PinSource;
@@ -75,9 +76,8 @@ enum StoredNodes {
 ///
 /// The buffer is byte-capped: this stock is input-scaled (planet holds
 /// several GB of decompressed relation blocks). Past the cap everything
-/// buffered is dropped, buffering never resumes, and the tail re-reads
-/// relation blobs from the PBF via `BlobFilter::only_relations` (indexed PBFs
-/// skip-read).
+/// buffered is dropped and buffering never resumes; the tail then gets the
+/// relations back through `replay`.
 struct RelationBuffer {
     cap: usize,
     blocks: Vec<PrimitiveBlock>,
@@ -85,23 +85,87 @@ struct RelationBuffer {
     /// those seen after the cap tripped.
     bytes: usize,
     spilled: bool,
+    replay: RelationReplay,
+}
+
+/// How the tail recovers relation blocks once the buffer has spilled.
+enum RelationReplay {
+    /// The locations pass records every relation frame's byte range, from
+    /// the first relation block on - the buffered prefix included, since
+    /// the cap drops it too - and the tail reads exactly those frames
+    /// (`replay`).
+    Frames(Vec<FrameRange>),
+    /// The ordered pass has no frame ranges: the tail re-reads the input
+    /// through `BlobFilter::only_relations`, which skip-reads only on an
+    /// input whose blobs carry index metadata.
+    Rescan,
 }
 
 impl RelationBuffer {
-    fn push(&mut self, block: PrimitiveBlock) {
+    fn push(
+        &mut self,
+        block: PrimitiveBlock,
+        range: Option<FrameRange>,
+    ) -> Result<(), PipelineError> {
+        match (&mut self.replay, range) {
+            (RelationReplay::Frames(frames), Some(range)) => frames.push(range),
+            (RelationReplay::Rescan, None) => {}
+            _ => {
+                return Err(PipelineError::internal(
+                    "relation block frame range does not match the replay mode",
+                ));
+            }
+        }
         self.bytes += block.decompressed_size();
         if self.spilled {
-            return;
+            return Ok(());
         }
         if self.bytes > self.cap {
             self.spilled = true;
             self.blocks = Vec::new();
             eprintln!(
-                "  Relation blocks exceed {} MB buffer cap - re-reading at tail",
+                "  Relation blocks exceed {} MB buffer cap - replaying them at tail",
                 self.cap / (1024 * 1024)
             );
         } else {
             self.blocks.push(block);
+        }
+        Ok(())
+    }
+}
+
+/// The tail's view of a replay source: every replayed block must still be a
+/// relation block, so a frame-range bookkeeping defect is refused instead of
+/// silently feeding the tail something else or dropping relations.
+struct RelationReplaySource {
+    source: Option<UnorderedBlockSource>,
+}
+
+impl Iterator for RelationReplaySource {
+    type Item = Result<PrimitiveBlock, PipelineError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let source = self.source.as_ref()?;
+        match source.recv() {
+            Some(Ok(decoded)) if decoded.kind == Some(BlockKind::Relations) => {
+                Some(Ok(decoded.block))
+            }
+            Some(Ok(_)) => {
+                self.source = None; // drop: stop reading
+                Some(Err(PipelineError::internal(
+                    "relation replay: a recorded relation frame decoded as another kind",
+                )))
+            }
+            Some(Err(error)) => {
+                self.source = None;
+                Some(Err(error))
+            }
+            None => {
+                if let Some(source) = self.source.take() {
+                    source.finish();
+                }
+                None
+            }
         }
     }
 }
@@ -164,6 +228,7 @@ impl Router<'_> {
         block: PrimitiveBlock,
         kind: Option<BlockKind>,
         members: Option<InjectedMembers>,
+        range: Option<FrameRange>,
     ) -> Result<(), PipelineError> {
         match kind {
             Some(BlockKind::Nodes) => self.route_nodes(block)?,
@@ -185,7 +250,7 @@ impl Router<'_> {
                     .expect("way dispatch started above")
                     .send(WayBlock { block, members });
             }
-            Some(BlockKind::Relations) => self.relations.push(block),
+            Some(BlockKind::Relations) => self.relations.push(block, range)?,
             None => {}
         }
         Ok(())
@@ -486,9 +551,16 @@ pub(super) fn phase_read_and_process(
             blocks: Vec::new(),
             bytes: 0,
             spilled: false,
+            replay: if locations_on_ways {
+                RelationReplay::Frames(Vec::new())
+            } else {
+                RelationReplay::Rescan
+            },
         },
     };
 
+    // The input handle the locations pass read, for the relation replay.
+    let mut replay_file = None;
     if locations_on_ways {
         // Elivagar-owned bounded read: see UnorderedBlockSource. Everything
         // downstream of this loop is order-free in locations mode.
@@ -501,9 +573,9 @@ pub(super) fn phase_read_and_process(
         drop(reader);
         while let Some(item) = source.recv() {
             let decoded = item?;
-            router.route(decoded.block, decoded.kind, decoded.members)?;
+            router.route(decoded.block, decoded.kind, decoded.members, decoded.range)?;
         }
-        source.finish();
+        replay_file = source.finish();
     } else {
         let blocks = reader
             .into_blocks_pipelined()
@@ -512,7 +584,7 @@ pub(super) fn phase_read_and_process(
             let block =
                 block_result.map_err(|e| PipelineError::failed("PBF read failed").with_cause(e))?;
             let kind = input::routed_kind(&block)?;
-            router.route(block, kind, None)?;
+            router.route(block, kind, None, None)?;
         }
     }
 
@@ -538,10 +610,25 @@ pub(super) fn phase_read_and_process(
     eprintln!("  Way index finalized, processing relations...");
 
     let relation_blocks_buffered = relations.blocks.len();
-    // Relation source: the in-RAM buffer, or a filtered PBF re-read when the
-    // buffer cap tripped.
+    // Relation source: the in-RAM buffer; when the buffer cap tripped, the
+    // recorded relation frames (locations pass) or a filtered PBF re-read
+    // (ordered pass).
+    let replay_frames = match &mut relations.replay {
+        RelationReplay::Frames(frames) if relations.spilled => Some(std::mem::take(frames)),
+        _ => None,
+    };
     let rel_blocks_source: Box<dyn Iterator<Item = Result<PrimitiveBlock, PipelineError>> + Send> =
-        if relations.spilled {
+        if let Some(frames) = replay_frames {
+            let file = replay_file.take().ok_or_else(|| {
+                PipelineError::internal("relation replay: the locations pass kept no input handle")
+            })?;
+            let runs = replay::FrameRuns::new(file, replay::merge_runs(frames)?);
+            crate::debug::emit_counter_u64("relation_replay_bytes", runs.total_bytes());
+            crate::debug::emit_counter_usize("relation_replay_runs", runs.run_count());
+            Box::new(RelationReplaySource {
+                source: Some(UnorderedBlockSource::spawn_replay(runs, decode_threads)),
+            })
+        } else if relations.spilled {
             let reader = ElementReader::from_path(&config.pbf_path)
                 .map_err(|e| {
                     PipelineError::failed("relation re-read: failed to open PBF").with_cause(e)

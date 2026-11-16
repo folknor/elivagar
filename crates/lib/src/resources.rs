@@ -178,7 +178,8 @@ pub(crate) struct Resources {
     pub(crate) dedup_cap: usize,
     /// pbfhogg decode workers.
     pub(crate) decode_threads: usize,
-    /// `ELIVAGAR_REL_BLOCKS_CAP`: debug hook; zero forces the re-read path.
+    /// `ELIVAGAR_REL_BLOCKS_CAP`: debug hook; zero forces the spilled path
+    /// (frame replay in locations mode, the filtered re-read otherwise).
     pub(crate) rel_blocks_buffer_cap: usize,
     /// `ELIVAGAR_ASSEMBLE_WORKERS`.
     assemble_worker_cap: usize,
