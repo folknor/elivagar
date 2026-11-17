@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Polygon intersection snapping follows i_overlay 9.2.0: a rounded
+  crossing that lies close to its exact position is kept instead of being
+  snapped to a nearby segment end, and crossings on axis-aligned segments
+  round instead of truncating. Polygon output changes slightly, mostly by
+  one unit at vertices where outlines cross.
+
+- Planet builds are about 20% faster on a 24-thread, 28 GB host (11:42 to
+  9:18 measured). The relation tail no longer re-reads the whole input
+  when relations outgrow their buffer, it reads back only the relation
+  blocks; the way index is loaded sequentially before the tail instead
+  of faulting in page by page; PMTiles leaf directories are compressed in
+  parallel; and assemble reads sort records into reusable buffers instead
+  of one allocation per record, which also cuts its page faults. Output
+  is unchanged.
+
 - The binary moved to its own crate: install it with
   `cargo install elivagar-cli`, which still installs a binary named
   `elivagar`. The `elivagar` crate is now the library alone. The

@@ -2,6 +2,7 @@ use crate::geometry::overlay::port::point::IntCoord;
 use crate::geometry::overlay::port::point::IntPoint;
 use crate::geometry::overlay::port::point::Triangle;
 use crate::geometry::overlay::port::segment::XSegment;
+use crate::geometry::overlay::port::split::SnapRadius;
 use core::marker::PhantomData;
 
 pub(super) type CollinearMask = u8;
@@ -70,7 +71,11 @@ pub(super) struct CrossSolver {
 }
 
 impl CrossSolver {
-    pub(super) fn cross(target: &XSegment, other: &XSegment, radius: i64) -> Option<CrossResult> {
+    pub(super) fn cross(
+        target: &XSegment,
+        other: &XSegment,
+        snap: SnapRadius,
+    ) -> Option<CrossResult> {
         let a0b0a1 = Triangle::clock_direction(target.a, target.b, other.a);
         let a0b0b1 = Triangle::clock_direction(target.a, target.b, other.b);
 
@@ -126,7 +131,7 @@ impl CrossSolver {
             };
         }
 
-        Self::middle_cross(target, other, radius)
+        Self::middle_cross(target, other, snap)
     }
 
     pub(super) fn collinear(target: &XSegment, other: &XSegment) -> CollinearMask {
@@ -156,10 +161,14 @@ impl CrossSolver {
         CollinearMask::new(is_target_a, is_target_b, is_other_a, is_other_b)
     }
 
-    fn middle_cross(target: &XSegment, other: &XSegment, radius: i64) -> Option<CrossResult> {
+    fn middle_cross(target: &XSegment, other: &XSegment, snap: SnapRadius) -> Option<CrossResult> {
         let p = CrossSolver::cross_point(target, other);
 
-        if Triangle::is_line(target.a, p, target.b) && Triangle::is_line(other.a, p, other.b) {
+        let target_dir = target.b - target.a;
+        let other_dir = other.b - other.a;
+        let target_cross = target_dir.cross_product(p - target.a);
+        let other_cross = other_dir.cross_product(p - other.a);
+        if target_cross == 0 && other_cross == 0 {
             return Some(CrossResult {
                 point: p,
                 cross_type: CrossType::Pure,
@@ -167,41 +176,36 @@ impl CrossSolver {
             });
         }
 
-        // still can be common ends because of rounding
-        // snap to nearest end with r (1^2 + 1^2 == 2)
-
-        let ra0 = target.a.sqr_distance(p);
-        let rb0 = target.b.sqr_distance(p);
-
-        let ra1 = other.a.sqr_distance(p);
-        let rb1 = other.b.sqr_distance(p);
-
-        if ra0 <= radius || ra1 <= radius || rb0 <= radius || rb1 <= radius {
-            let r0 = ra0.min(rb0);
-            let r1 = ra1.min(rb1);
-
-            if r0 <= r1 {
-                let p = if ra0 < rb0 { target.a } else { target.b };
-                // ignore if it's a clean point
-                if Triangle::is_not_line(other.a, p, other.b) {
-                    return Some(CrossResult {
-                        point: p,
-                        cross_type: CrossType::TargetEnd,
-                        is_round: true,
-                    });
-                }
+        // Rounding can bring the crossing close to an endpoint. Snap to the
+        // nearest one inside the radius, unless the exact crossing sits
+        // near the rounded grid node (i_overlay 9.2.0 snapping).
+        let ra0 = target.a.sqr_distance(p).unsigned_abs();
+        let rb0 = target.b.sqr_distance(p).unsigned_abs();
+        let ra1 = other.a.sqr_distance(p).unsigned_abs();
+        let rb1 = other.b.sqr_distance(p).unsigned_abs();
+        let r0 = ra0.min(rb0);
+        let r1 = ra1.min(rb1);
+        let nearest = r0.min(r1);
+        if nearest <= snap.radius_squared
+            && (nearest == 0
+                || !snap.is_near_grid(target_dir, other_dir, target_cross, other_cross))
+        {
+            let (point, cross_type) = if r0 <= r1 {
+                (
+                    if ra0 < rb0 { target.a } else { target.b },
+                    CrossType::TargetEnd,
+                )
             } else {
-                let p = if ra1 < rb1 { other.a } else { other.b };
-
-                // ignore if it's a clean point
-                if Triangle::is_not_line(target.a, p, target.b) {
-                    return Some(CrossResult {
-                        point: p,
-                        cross_type: CrossType::OtherEnd,
-                        is_round: true,
-                    });
-                }
-            }
+                (
+                    if ra1 < rb1 { other.a } else { other.b },
+                    CrossType::OtherEnd,
+                )
+            };
+            return Some(CrossResult {
+                point,
+                cross_type,
+                is_round: true,
+            });
         }
 
         Some(CrossResult {
@@ -209,6 +213,17 @@ impl CrossSolver {
             cross_type: CrossType::Pure,
             is_round: true,
         })
+    }
+
+    /// Nearest-integer quotient, ties toward zero. Axis-aligned crossings
+    /// round like the general branch instead of truncating.
+    #[inline]
+    fn divide_round_half_toward_zero(numerator: i64, divisor: i64) -> i64 {
+        let d = divisor.unsigned_abs();
+        let quotient = (numerator.unsigned_abs() + ((d - 1) >> 1)) / d;
+        numerator.signum()
+            * divisor.signum()
+            * crate::geometry::overlay::port::point::wide_from_uint(quotient)
     }
 
     fn cross_point(target: &XSegment, other: &XSegment) -> IntPoint {
@@ -271,11 +286,11 @@ impl CrossSolver {
         if a1x == 0i64 {
             // dxB is not zero because it will be parallel case and it's impossible
             x0 = 0i64;
-            y0 = xy_b / dx_b;
+            y0 = Self::divide_round_half_toward_zero(xy_b, dx_b);
         } else if a1y == 0i64 {
             // dyB is not zero because it will be parallel case and it's impossible
             y0 = 0i64;
-            x0 = -xy_b / dy_b;
+            x0 = Self::divide_round_half_toward_zero(-xy_b, dy_b);
         } else {
             // divider
             let div = a1y * dx_b - a1x * dy_b;
@@ -313,11 +328,55 @@ mod tests {
     use crate::geometry::overlay::port::cross::{CrossSolver, CrossType};
     use crate::geometry::overlay::port::point::IntPoint;
     use crate::geometry::overlay::port::segment::XSegment;
+    use crate::geometry::overlay::port::split::SnapRadius;
 
     impl XSegment {
         fn new(a: IntPoint, b: IntPoint) -> Self {
             Self { a, b }
         }
+    }
+
+    #[test]
+    fn snap_threshold_is_not_squared_twice() {
+        let target = XSegment::new(IntPoint::new(0, 0), IntPoint::new(5, 5));
+        let other = XSegment::new(IntPoint::new(0, 3), IntPoint::new(5, -2));
+        // The rounded crossing is (2, 2). Its nearest endpoint is (0, 3),
+        // at squared distance 5. A threshold of 4 must not snap.
+        let crossing = CrossSolver::cross(&target, &other, SnapRadius::new(4)).expect("must cross");
+        assert!(matches!(crossing.cross_type, CrossType::Pure));
+        assert_eq!(crossing.point, IntPoint::new(2, 2));
+        let snapped = CrossSolver::cross(&target, &other, SnapRadius::new(5)).expect("must cross");
+        assert!(matches!(snapped.cross_type, CrossType::OtherEnd));
+        assert_eq!(snapped.point, other.a);
+    }
+
+    #[test]
+    fn grid_protection_halves_between_passes() {
+        let a = XSegment::new(IntPoint::new(-3, -4), IntPoint::new(3, 4));
+        let b = XSegment::new(IntPoint::new(0, 1), IntPoint::new(3, -5));
+        let mut snap = SnapRadius::new(1);
+        let first = CrossSolver::cross(&a, &b, snap).expect("must cross");
+        assert!(matches!(first.cross_type, CrossType::Pure));
+        assert_eq!(first.point, IntPoint::ZERO);
+        snap.increment(0);
+        let second = CrossSolver::cross(&a, &b, snap).expect("must cross");
+        assert!(matches!(second.cross_type, CrossType::OtherEnd));
+        assert_eq!(second.point, b.a);
+    }
+
+    #[test]
+    fn axis_aligned_crossings_round_to_the_nearest_node() {
+        let p = IntPoint::new;
+        let horizontal = XSegment::new(p(-2, -1), p(-1, -1));
+        let vertical = XSegment::new(p(-1, -2), p(-1, -1));
+        assert_eq!(
+            CrossSolver::cross_point(&horizontal, &XSegment::new(p(-2, 2), p(-1, -2))),
+            p(-1, -1)
+        );
+        assert_eq!(
+            CrossSolver::cross_point(&vertical, &XSegment::new(p(-2, -1), p(2, -2))),
+            p(-1, -1)
+        );
     }
 
     #[test]
@@ -327,7 +386,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, 0), IntPoint::new(s, 0));
         let eb = XSegment::new(IntPoint::new(0, -s), IntPoint::new(0, s));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
+        let result = CrossSolver::cross(&ea, &eb, SnapRadius::new(2)).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Pure => {
@@ -346,7 +405,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, 0), IntPoint::new(s, 0));
         let eb = XSegment::new(IntPoint::new(0, -s), IntPoint::new(0, s));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
+        let result = CrossSolver::cross(&ea, &eb, SnapRadius::new(2)).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Pure => {
@@ -365,7 +424,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, 0), IntPoint::new(s, 0));
         let eb = XSegment::new(IntPoint::new(1024, -s), IntPoint::new(1024, s));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
+        let result = CrossSolver::cross(&ea, &eb, SnapRadius::new(2)).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Pure => {
@@ -385,7 +444,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, -s), IntPoint::new(s, s));
         let eb = XSegment::new(IntPoint::new(q, -s), IntPoint::new(q, s));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
+        let result = CrossSolver::cross(&ea, &eb, SnapRadius::new(2)).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Pure => {
@@ -404,7 +463,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, 0), IntPoint::new(s, 0));
         let eb = XSegment::new(IntPoint::new(-s, -s), IntPoint::new(-s, s));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
+        let result = CrossSolver::cross(&ea, &eb, SnapRadius::new(2)).expect("segments must cross");
 
         match result.cross_type {
             CrossType::TargetEnd => {
@@ -423,7 +482,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, 0), IntPoint::new(s, 0));
         let eb = XSegment::new(IntPoint::new(s, -s), IntPoint::new(s, s));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
+        let result = CrossSolver::cross(&ea, &eb, SnapRadius::new(2)).expect("segments must cross");
 
         match result.cross_type {
             CrossType::TargetEnd => {
@@ -442,7 +501,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, s), IntPoint::new(s, s));
         let eb = XSegment::new(IntPoint::new(-s, s), IntPoint::new(-s, -s));
 
-        let result = CrossSolver::cross(&ea, &eb, 2);
+        let result = CrossSolver::cross(&ea, &eb, SnapRadius::new(2));
         debug_assert!(result.is_none());
     }
 
@@ -451,7 +510,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(7256, -14637), IntPoint::new(7454, -15045));
         let eb = XSegment::new(IntPoint::new(7343, -14833), IntPoint::new(7506, -15144));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
+        let result = CrossSolver::cross(&ea, &eb, SnapRadius::new(2)).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Pure => {}
@@ -472,7 +531,7 @@ mod tests {
             IntPoint::new(-1023948, -10239),
         );
 
-        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
+        let result = CrossSolver::cross(&ea, &eb, SnapRadius::new(2)).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Pure => {
@@ -495,7 +554,7 @@ mod tests {
             IntPoint::new(513224, -5243),
         );
 
-        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
+        let result = CrossSolver::cross(&ea, &eb, SnapRadius::new(2)).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Overlay => {
@@ -518,7 +577,7 @@ mod tests {
             IntPoint::new(-276659430, 380789040),
         );
 
-        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
+        let result = CrossSolver::cross(&ea, &eb, SnapRadius::new(2)).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Overlay => {
@@ -537,7 +596,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, 0), IntPoint::new(s / 2, 0));
         let eb = XSegment::new(IntPoint::new(0, 0), IntPoint::new(s, 0));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
+        let result = CrossSolver::cross(&ea, &eb, SnapRadius::new(2)).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Overlay => {

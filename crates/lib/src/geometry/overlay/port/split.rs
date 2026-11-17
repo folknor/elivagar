@@ -3,6 +3,7 @@ use crate::geometry::overlay::port::cross::{CrossSolver, CrossType, EndMask};
 use crate::geometry::overlay::port::grid::Fragment;
 use crate::geometry::overlay::port::grid::{BorderVSegment, FragmentBuffer, GridLayout};
 use crate::geometry::overlay::port::point::IntPoint;
+use crate::geometry::overlay::port::point::IntVector;
 use crate::geometry::overlay::port::segment::LineRange;
 use crate::geometry::overlay::port::segment::Segment;
 use crate::geometry::overlay::port::segment::ShapeCountBoolean;
@@ -79,9 +80,9 @@ impl SplitSolver {
         ei: &XSegment,
         ej: &XSegment,
         marks: &mut Vec<LineMark>,
-        radius: i64,
+        snap_radius: SnapRadius,
     ) -> bool {
-        let cross = if let Some(cross) = CrossSolver::cross(ei, ej, radius) {
+        let cross = if let Some(cross) = CrossSolver::cross(ei, ej, snap_radius) {
             cross
         } else {
             return false;
@@ -284,31 +285,67 @@ impl SortMarkByIndexAndPoint for [LineMark] {
     }
 }
 
+/// The snap state of one split pass, `SnapRadius<i32>` upstream (i_overlay
+/// 9.2.0): a squared-distance threshold for snapping a rounded crossing to
+/// an existing endpoint, plus a grid shift that protects crossings whose
+/// exact rational position lies close to the rounded grid node. Both grow
+/// per pass; the grid tolerance halves each time.
+#[derive(Clone, Copy)]
 pub(super) struct SnapRadius {
-    current: usize,
-    step: usize,
+    pub(super) radius_squared: u64,
+    grid_shift: u32,
 }
 
 impl SnapRadius {
-    pub(super) fn increment(&mut self) {
-        self.current = self.current.saturating_add(self.step);
+    /// 2 * (32 - 4): caps the linear radius at 2^28 for the i32 engine.
+    const MAX_EXPONENT: usize = 56;
+
+    pub(super) fn new(radius_squared: u64) -> Self {
+        Self {
+            radius_squared,
+            grid_shift: 1,
+        }
     }
 
-    /// Squared-distance threshold for snapping to an existing endpoint. The
-    /// exponent caps at 2 * (32 - 4) = 56, limiting the linear radius to
-    /// 2^28 for the i32 engine.
-    pub(super) fn radius_squared(&self) -> i64 {
-        let exponent = self.current.min(56) as u32;
-        1i64 << exponent
+    pub(super) fn increment(&mut self, step: usize) {
+        let exponent = (self.radius_squared.ilog2() as usize)
+            .saturating_add(step)
+            .min(Self::MAX_EXPONENT);
+        self.radius_squared = 1u64 << exponent as u32;
+        self.grid_shift = (self.grid_shift + 1).min(u64::BITS - 1);
+    }
+
+    /// Whether the exact crossing lies within 2^-grid_shift of the rounded
+    /// point, measured on the rational offset `(dx, dy) / denominator`.
+    pub(super) fn is_near_grid(
+        &self,
+        dir_a: IntVector,
+        dir_b: IntVector,
+        cross_a: i64,
+        cross_b: i64,
+    ) -> bool {
+        let denominator = dir_a.cross_product(dir_b).unsigned_abs();
+        let dx = (cross_a * dir_b.x - cross_b * dir_a.x).unsigned_abs();
+        let dy = (cross_a * dir_b.y - cross_b * dir_a.y).unsigned_abs();
+        let axis_limit = denominator >> self.grid_shift;
+        if dx.max(dy) > axis_limit {
+            return false;
+        }
+        if dx + dy <= axis_limit {
+            return true;
+        }
+
+        let x = (dx << self.grid_shift) as u128;
+        let y = (dy << self.grid_shift) as u128;
+        let d = denominator as u128;
+        (x * x).checked_add(y * y).is_some_and(|sum| sum <= d * d)
     }
 }
 
 impl Solver {
     pub(super) fn snap_radius(&self) -> SnapRadius {
-        SnapRadius {
-            current: self.precision.start,
-            step: self.precision.progression,
-        }
+        let exponent = self.precision.start.min(SnapRadius::MAX_EXPONENT);
+        SnapRadius::new(1u64 << exponent as u32)
     }
 }
 
@@ -327,8 +364,6 @@ impl SplitSolver {
             need_to_fix = false;
             self.marks.clear();
 
-            let radius_squared = snap_radius.radius_squared();
-
             for (i, si) in segments.iter().enumerate() {
                 let xsi = &si.x_segment;
                 let ri = xsi.y_range();
@@ -342,7 +377,7 @@ impl SplitSolver {
                         continue;
                     }
 
-                    let is_round = Self::cross(i, j, xsi, xsj, &mut self.marks, radius_squared);
+                    let is_round = Self::cross(i, j, xsi, xsj, &mut self.marks, snap_radius);
                     need_to_fix = need_to_fix || is_round;
                 }
             }
@@ -353,7 +388,7 @@ impl SplitSolver {
             any_intersection = true;
             self.apply(segments);
 
-            snap_radius.increment();
+            snap_radius.increment(solver.precision.progression);
 
             if need_to_fix && !solver.is_list_split(segments) {
                 // finish with tree solver if edges is become large
@@ -426,8 +461,6 @@ impl SplitSolver {
             need_to_fix = false;
             self.marks.clear();
 
-            let radius_squared = snap_radius.radius_squared();
-
             for (i, si) in segments.iter().enumerate() {
                 let time = si.x_segment.a.x;
                 let si_range = si.x_segment.y_range().into();
@@ -444,7 +477,7 @@ impl SplitSolver {
                         this,
                         scan,
                         &mut self.marks,
-                        radius_squared,
+                        snap_radius,
                     );
 
                     need_to_fix = is_round || need_to_fix;
@@ -463,7 +496,7 @@ impl SplitSolver {
 
             self.apply(segments);
 
-            snap_radius.increment();
+            snap_radius.increment(solver.precision.progression);
         }
 
         self.tree_buffer.tree = tree;
@@ -900,7 +933,7 @@ impl SplitSolver {
             }
 
             let mut buffer = core::mem::replace(&mut self.fragment_buffer, FragmentBuffer::empty());
-            need_to_fix = self.process(snap_radius.radius_squared(), &mut buffer, solver);
+            need_to_fix = self.process(snap_radius, &mut buffer, solver);
 
             #[cfg(debug_assertions)]
             debug_assert!(buffer.is_on_border_sorted());
@@ -932,7 +965,7 @@ impl SplitSolver {
 
             self.apply(segments);
 
-            snap_radius.increment();
+            snap_radius.increment(solver.precision.progression);
         }
 
         any_intersection
@@ -941,7 +974,7 @@ impl SplitSolver {
     #[inline]
     fn process(
         &mut self,
-        radius_squared: i64,
+        snap_radius: SnapRadius,
         buffer: &mut FragmentBuffer,
         _solver: &Solver,
     ) -> bool {
@@ -950,14 +983,14 @@ impl SplitSolver {
             if group.is_empty() {
                 continue;
             }
-            let any_round = Self::bin_split(radius_squared, group, &mut self.marks);
+            let any_round = Self::bin_split(snap_radius, group, &mut self.marks);
             is_any_round = is_any_round || any_round;
         }
         is_any_round
     }
 
     fn bin_split(
-        radius_squared: i64,
+        snap_radius: SnapRadius,
         fragments: &mut [Fragment],
         marks: &mut Vec<LineMark>,
     ) -> bool {
@@ -981,9 +1014,9 @@ impl SplitSolver {
                 // MARK: the intersection, ensuring the right order for deterministic results
 
                 let is_round = if fi.x_segment < fj.x_segment {
-                    Self::cross_fragments(fi, fj, radius_squared, marks)
+                    Self::cross_fragments(fi, fj, snap_radius, marks)
                 } else {
-                    Self::cross_fragments(fj, fi, radius_squared, marks)
+                    Self::cross_fragments(fj, fi, snap_radius, marks)
                 };
 
                 any_round = any_round || is_round;
@@ -1032,7 +1065,7 @@ impl SplitSolver {
     fn cross_fragments(
         fi: &Fragment,
         fj: &Fragment,
-        radius_squared: i64,
+        snap_radius: SnapRadius,
         marks: &mut Vec<LineMark>,
     ) -> bool {
         // Fragments only select candidate pairs; marks belong to the complete
@@ -1046,7 +1079,7 @@ impl SplitSolver {
             &fi.x_segment,
             &fj.x_segment,
             marks,
-            radius_squared,
+            snap_radius,
         )
     }
 }
@@ -1157,7 +1190,11 @@ mod upstream_split_regressions {
         let mut marks = Vec::new();
         // The first column's enclosures overlap, but the rounded crossing at
         // (50, 1) lies in a later column. Marks belong to the full segments.
-        assert!(SplitSolver::bin_split(1, &mut buffer.groups[0], &mut marks));
+        assert!(SplitSolver::bin_split(
+            SnapRadius::new(1),
+            &mut buffer.groups[0],
+            &mut marks
+        ));
         assert_eq!(marks.len(), 2);
         assert_eq!(marks[0].index, 0);
         assert_eq!(marks[1].index, 1);
@@ -1278,32 +1315,29 @@ mod upstream_split_regressions {
 
     #[test]
     fn squared_radius_preserves_initial_progression() {
-        let mut snap = SnapRadius {
-            current: 0,
-            step: 1,
-        };
-        for expected in [1, 2, 4, 8] {
-            assert_eq!(snap.radius_squared(), expected);
-            snap.increment();
+        let mut snap = SnapRadius::new(1);
+        for (expected, grid_shift) in [(1, 1), (2, 2), (4, 3), (8, 4)] {
+            assert_eq!(snap.radius_squared, expected);
+            assert_eq!(snap.grid_shift, grid_shift);
+            snap.increment(1);
         }
+        // A zero progression keeps the radius but still tightens the grid.
+        let mut snap = SnapRadius::new(1);
+        snap.increment(0);
+        assert_eq!(snap.radius_squared, 1);
+        assert_eq!(snap.grid_shift, 2);
     }
 
     #[test]
     fn squared_radius_saturates_at_the_i32_limit() {
-        let limit = 1i64 << 56;
-        let mut snap = SnapRadius {
-            current: 55,
-            step: 1,
-        };
-        assert_eq!(snap.radius_squared(), limit / 2);
-        snap.increment();
-        assert_eq!(snap.radius_squared(), limit);
-        snap.increment();
-        assert_eq!(snap.radius_squared(), limit);
-        snap.step = usize::MAX;
-        snap.increment();
-        assert_eq!(snap.radius_squared(), limit);
-        snap.increment();
-        assert_eq!(snap.radius_squared(), limit);
+        let limit = 1u64 << 56;
+        let mut snap = SnapRadius::new(limit / 2);
+        snap.increment(1);
+        assert_eq!(snap.radius_squared, limit);
+        for _ in 0..256 {
+            snap.increment(usize::MAX);
+        }
+        assert_eq!(snap.radius_squared, limit);
+        assert_eq!(snap.grid_shift, u64::BITS - 1);
     }
 }

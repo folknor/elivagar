@@ -1153,3 +1153,43 @@ before the tail reads it. Two fixes, both host-independent:
 
 The residual 116K faults are later reclaim: the tail itself writes about
 26 GB of sort output while it runs.
+
+## Planet assemble and close (2026-11-16, bygg, script bench)
+
+Same host and spelling as the section above; one iteration per row.
+
+| run | commit / arm | wall | phase12 | assemble | assemble peak anon |
+|---|---|---|---|---|---|
+| `a2dfe2fa` | `3295854` glibc | 9:44 | 358.8 s | 223.5 s | 7.9 GB |
+| `6330ddd5` | `3295854` jemalloc preload | 9:40 | 375.8 s | 202.2 s | 4.7 GB |
+| `6f1deeae` | `3295854` jemalloc thp:always, metadata_thp:always | 9:40 | 375.1 s | 202.9 s | 4.7 GB |
+| `23e3f4a9` | `4c73021` slab batches, glibc | 9:18 | 357.0 s | 199.7 s | 9.2 GB |
+| `f5462f22` | `4c73021`, `ELIVAGAR_ASSEMBLE_WORKERS=12` | 9:15 | - | - | - |
+
+- `3295854` parallel leaf directories: the window from the dedup counters
+  to the directory counters fell from 9.1 s (`938a987b`) to 2.8 s.
+- Allocator: wall is par across all three arms, so the system allocator
+  stays (`crates/cli/src/main.rs` records the ruling). The arms split by
+  phase - jemalloc 21 s faster in assemble, 17 s slower in phase12 with
+  2.6x the minor faults - and the THP settings changed nothing on a host
+  whose THP is already `always`. The jemalloc arms were tagged by
+  `MALLOC_CONF` (captured) and confirmed by `malloc_held_*` reading 0.
+- `4c73021` slab batches removed about 2.5 billion per-record payload
+  allocations from the assemble read path: assemble minor faults 31M ->
+  0.85M, assemble 223.5 -> 199.7 s, under glibc faster than the jemalloc
+  arms. Peak anon grows by the recycled slabs (three per worker) and the
+  per-source record buffers.
+- The brokkr sidecar's `vol_cs` is the main task's count, which during
+  assemble is the ordered writer, not the phase: about 1M on every arm,
+  so the writer still waits on batches. Twelve merge readers instead of
+  eight moved wall by 3 s, so reader count is not what holds assemble at
+  ~17.6 of 24 cores.
+- Ruled out, huge pages for the node and way stores: a locations build
+  has no node store, and after `23a8683` loads the way index sequentially
+  nothing in it is slow enough to pay for. Revisit only for a raw-input
+  planet build, where the node store does exist.
+- Ruled out, slowest-first partition scheduling: the PMTiles writer emits
+  tiles in tile-id order, so finishing a slow partition early only parks
+  its output until every partition before it lands. The allocation churn
+  that showed up as the jemalloc assemble gap was the better target, and
+  `4c73021` took it.

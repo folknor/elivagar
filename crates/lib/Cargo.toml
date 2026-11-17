@@ -26,7 +26,7 @@ brotli = "9.0.0"
 lz4_flex = "0.14.1"
 snap = "1"
 smallvec = "1.15.2"
-hotpath = "0.31.3"
+hotpath = "0.32.0"
 rustc-hash = "2"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
@@ -36,7 +36,9 @@ geo-types = { version = "0.7.19", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
-i_overlay = "9.0.0"
+# The differential oracle for geometry/overlay; its floor is the release
+# the engine's snapping was last ported from.
+i_overlay = "9.2.0"
 serde_yaml = "0.9"
 pmtiles = { version = "0.28.1", default-features = false, features = ["write"] }
 tempfile = "3.27"

@@ -192,16 +192,6 @@ impl Triangle {
     }
 
     #[inline(always)]
-    pub fn is_not_line(p0: IntPoint, p1: IntPoint, p2: IntPoint) -> bool {
-        Self::area_two(p0, p1, p2) != 0
-    }
-
-    #[inline(always)]
-    pub fn is_line(p0: IntPoint, p1: IntPoint, p2: IntPoint) -> bool {
-        Self::area_two(p0, p1, p2) == 0
-    }
-
-    #[inline(always)]
     pub fn clock_direction(p0: IntPoint, p1: IntPoint, p2: IntPoint) -> i64 {
         Self::area_two(p0, p2, p1).signum()
     }

@@ -406,7 +406,9 @@ mod tests {
         &[(-2, 1), (-5, 1), (-2, 4)],
     ];
 
-    const OWNER_HOLE: &[(i32, i32)] = &[(-4, 3), (-4, 4), (-3, 2)];
+    /// i_overlay 9.2.0's snapping keeps the crossing at (-3, 4), so the
+    /// pocket touches the outer there. Non-OGC output, which this engine
+    /// emits, walks it as part of the outer contour rather than a hole.
     const OWNER_OUTER: &[(i32, i32)] = &[
         (-6, 5),
         (-10, 5),
@@ -415,8 +417,11 @@ mod tests {
         (-2, 1),
         (-2, 3),
         (0, 4),
-        (-2, 4),
-        (-3, 3),
+        (-3, 4),
+        (-3, 2),
+        (-4, 3),
+        (-4, 4),
+        (-3, 4),
         (-3, 5),
         (-4, 5),
         (-4, 6),
@@ -502,7 +507,11 @@ mod tests {
             subject_union(&mut engine, &shape, &mut out);
             let outers = usize::try_from(squares).expect("small count") + 2;
             assert_eq!(out.len(), outers, "squares={squares}");
-            assert_hole_owner(&out, OWNER_HOLE, OWNER_OUTER);
+            let owner = canonical(&contour(OWNER_OUTER));
+            let owners = out.iter().filter(|s| canonical(&s[0]) == owner).count();
+            assert_eq!(owners, 1, "expected exactly one matching outer: {out:?}");
+            let hole_count: usize = out.iter().map(|shape| shape.len() - 1).sum();
+            assert_eq!(hole_count, 0, "squares={squares}");
             let expected = oracle_overlay(&shape, None, OracleRule::Subject, OracleSolver::AUTO);
             assert_eq!(out, expected, "squares={squares}");
         }
