@@ -145,6 +145,54 @@ and decoder consolidations for internal consumers.
 
 Reported by the polygon-engine and encoding hunts.
 
+**Performance account (2026-11-17 performance hunt; encode-write,
+emission, line-kernels and sort hunters).** The same mechanism is also the
+largest per-tile cost in assemble. The path a line takes is Mercator points
+-> clipped points -> tile coordinates -> MVT command words -> sort payload ->
+owned command words (`wire_format` allocates a geometry `Vec` and tag `Vec`
+per feature and interns attributes into owned tables, two owned strings per
+distinct string value, schema key ids turned back into strings) ->
+concatenated command words (`merge_same_attr_geometries` sorts features by tag
+vector, decodes each stream, builds another vector and clones it into the
+survivor) -> absolute segments (`merge_connected_lines` below z14) -> merged
+coordinates -> command words -> packed bytes -> feature buffer -> layer
+buffer -> tile buffer, three full buffer copies after the varint encode.
+
+Redesign the encode-write hunter calls its highest-conviction rewrite, and
+the one that also pays on unique high-zoom tiles where dedup saves nothing:
+compile one layer at a time from borrowed records. Validate envelopes and
+keep geometry spans, borrowed strings and typed scalars; use `AttrKey` ids
+directly with the present-key table filtered from a precomputed alphabetical
+schema order; intern ordered attribute tuples into tile-local group ids and
+group non-point features by (geometry type, group id) keeping first-member
+position and member order (grouping linear rather than a sort by tag
+vector); represent merged polygon and z14 line geometry as lists of source
+spans; feed sub-z14 line spans straight into the line merger and encode its
+output straight to protobuf bytes; precompute message lengths and write
+features into their final position in the tile buffer, deleting the packed,
+feature and layer staging buffers. Can preserve uncompressed MVT bytes
+exactly. What the record side should provide: borrowed geometry and attribute
+views, plus first-point, final-cursor and encoded-length summaries so
+concatenation rebases only the first pair; coordinate spans for lines bound
+for the merger. Different record variants are fine; a universal intermediate
+geometry is not needed. The emission and sort hunters add: store attributes
+once per distinct visibility interval (fifteen zooms are not fifteen
+attribute sets; streets have up to three, at z11 and z14) and reference them
+from records, since a bundle of A bytes copied into F records costs F*A;
+keep resident commands native and judge spill packing separately, because
+compact commands add decode work where today a bulk copy works.
+
+Constraints all four named: preserve point singletons, ocean's exclusion
+from same-attribute merge, group placement at first member, singleton ids and
+id removal only for groups that merge, the exact segment order into the line
+merger, and bitwise float equality including signed zero and NaN. Any
+record-format change must replace the payload-byte tie-break in
+`sort::key::record_cmp` with an explicit logical order, because changing
+serialization otherwise changes feature order; the current comparator orders
+feature ids by their little-endian bytes, not numerically, and attributes are
+interned in encounter order, so order changes reach attribute tables and
+merge destinations, not only compressed bytes.
+
 ## STR-014 - Move lines and points onto the integer pipeline
 
 The coordinate-spaces hunt's "bolder version": quantize-early integer
